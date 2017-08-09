@@ -3,19 +3,19 @@ import Base: show
 const OSNAME = is_windows() ? :Windows : KERNEL
 
 # A dependency provider, if successfully executed will satisfy the dependency
-abstract DependencyProvider
+abstract type DependencyProvider end
 
 # A library helper may be used by `DependencyProvider`s but will by itself not provide the library
-abstract DependencyHelper
+abstract type DependencyHelper end
 
-type PackageContext
+mutable struct PackageContext
     do_install::Bool
     dir::AbstractString
     package::AbstractString
     deps::Vector{Any}
 end
 
-type LibraryDependency
+mutable struct LibraryDependency
     name::AbstractString
     context::PackageContext
     providers::Vector{Tuple{DependencyProvider,Dict{Symbol,Any}}}
@@ -24,7 +24,7 @@ type LibraryDependency
     libvalidate::Function
 end
 
-type LibraryGroup
+mutable struct LibraryGroup
     name::AbstractString
     deps::Vector{LibraryDependency}
 end
@@ -91,7 +91,7 @@ export library_dependency, bindir, srcdir, usrdir, libdir
 
 library_dependency(args...; properties...) = error("No context provided. Did you forget `@BinDeps.setup`?")
 
-abstract PackageManager <: DependencyProvider
+abstract type PackageManager <: DependencyProvider end
 
 DEBIAN_VERSION_REGEX = r"^
     ([0-9]+\:)?                                           # epoch
@@ -100,13 +100,13 @@ DEBIAN_VERSION_REGEX = r"^
 "ix
 
 const has_apt = try success(`apt-get -v`) && success(`apt-cache -v`) catch e false end
-type AptGet <: PackageManager
+mutable struct AptGet <: PackageManager
     package::AbstractString
 end
 can_use(::Type{AptGet}) = has_apt && is_linux()
 package_available(p::AptGet) = can_use(AptGet) && !isempty(available_versions(p))
 function available_versions(p::AptGet)
-    vers = Compat.ASCIIString[]
+    vers = String[]
     lookfor_version = false
     for l in eachline(`apt-cache showpkg $(p.package)`)
         if startswith(l,"Version:")
@@ -136,7 +136,7 @@ pkg_name(a::AptGet) = a.package
 libdir(p::AptGet,dep) = ["/usr/lib", "/usr/lib64", "/usr/lib32", "/usr/lib/x86_64-linux-gnu", "/usr/lib/i386-linux-gnu"]
 
 const has_yum = try success(`yum --version`) catch e false end
-type Yum <: PackageManager
+mutable struct Yum <: PackageManager
     package::AbstractString
 end
 can_use(::Type{Yum}) = has_yum && is_linux()
@@ -165,7 +165,7 @@ pkg_name(y::Yum) = y.package
 
 # Note that `pacman --version` has an unreliable return value.
 const has_pacman = try success(`pacman -Qq`) catch e false end
-type Pacman <: PackageManager
+mutable struct Pacman <: PackageManager
     package::AbstractString
 end
 can_use(::Type{Pacman}) = has_pacman && is_linux()
@@ -197,7 +197,7 @@ libdir(p::Pacman,dep) = ["/usr/lib", "/usr/lib32"]
 
 # zypper is a package manager used by openSUSE
 const has_zypper = try success(`zypper --version`) catch e false end
-type Zypper <: PackageManager
+mutable struct Zypper <: PackageManager
     package::AbstractString
 end
 can_use(::Type{Zypper}) = has_zypper && is_linux()
@@ -227,22 +227,22 @@ libdir(z::Zypper,dep) = ["/usr/lib", "/usr/lib32", "/usr/lib64"]
 # Can use everything else without restriction by default
 can_use(::Type) = true
 
-abstract Sources <: DependencyHelper
-abstract Binaries <: DependencyProvider
+abstract type Sources <: DependencyHelper end
+abstract type Binaries <: DependencyProvider end
 
 #
 # A dummy provider checked for every library that
 # indicates the library was found somewhere on the
 # system using dlopen.
 #
-immutable SystemPaths <: DependencyProvider; end
+struct SystemPaths <: DependencyProvider; end
 
 show(io::IO, ::SystemPaths) = print(io,"System Paths")
 
 using URIParser
 export URI
 
-type NetworkSource <: Sources
+mutable struct NetworkSource <: Sources
     uri::URI
 end
 
@@ -251,28 +251,28 @@ function srcdir( dep::LibraryDependency, s::NetworkSource,opts)
     joinpath(srcdir(dep),get(opts,:unpacked_dir,splittarpath(basename(s.uri.path))[1]))
 end
 
-type RemoteBinaries <: Binaries
+mutable struct RemoteBinaries <: Binaries
     uri::URI
 end
 
-type CustomPathBinaries <: Binaries
+mutable struct CustomPathBinaries <: Binaries
     path::AbstractString
 end
 
 libdir(p::CustomPathBinaries,dep) = p.path
 
-abstract BuildProcess <: DependencyProvider
+abstract type BuildProcess <: DependencyProvider end
 
-type SimpleBuild <: BuildProcess
+mutable struct SimpleBuild <: BuildProcess
     steps
 end
 
-type Autotools <: BuildProcess
+mutable struct Autotools <: BuildProcess
     source
     opts
 end
 
-type GetSources <: BuildStep
+mutable struct GetSources <: BuildStep
     dep::LibraryDependency
 end
 
@@ -556,29 +556,13 @@ function _find_library(dep::LibraryDependency; provider = Any)
     return ret
 end
 
-if VERSION < v"0.5.0-dev+1022"
-    function check_path!(ret,dep,opath)
-        flags = Libdl.RTLD_LAZY
-        handle = Libc.malloc(2*sizeof(Ptr{Void}))
-        err = ccall(:jl_uv_dlopen,Cint,(Ptr{UInt8},Ptr{Void},Cuint),opath,handle,flags)
-        if err == 0
-            check_system_handle!(ret,dep,handle)
-            Libdl.dlclose(handle)
-            # in Julia 0.4 handle is freed by dlclose.
-            if VERSION < v"0.4-"
-                c_free(handle)
-            end
-        end
-    end
-else
-    function check_path!(ret, dep, opath)
-        flags = Libdl.RTLD_LAZY
-        handle = ccall(:jl_dlopen, Ptr{Void}, (Cstring, Cuint), opath, flags)
-        try
-            check_system_handle!(ret, dep, handle)
-        finally
-            handle != C_NULL && Libdl.dlclose(handle)
-        end
+function check_path!(ret, dep, opath)
+    flags = Libdl.RTLD_LAZY
+    handle = ccall(:jl_dlopen, Ptr{Void}, (Cstring, Cuint), opath, flags)
+    try
+        check_system_handle!(ret, dep, handle)
+    finally
+        handle != C_NULL && Libdl.dlclose(handle)
     end
 end
 
